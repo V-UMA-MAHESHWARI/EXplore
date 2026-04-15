@@ -4,7 +4,14 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { 
+  motion, 
+  AnimatePresence, 
+  useScroll, 
+  useTransform, 
+  useSpring, 
+  useMotionValue 
+} from 'motion/react';
 import { 
   Send, 
   Bot, 
@@ -36,19 +43,27 @@ import {
   CheckCircle2,
   AlertCircle,
   Volume2,
+  Download,
+  Copy,
+  Check,
   Brain,
   Image as ImageIcon,
   FileImage,
   Loader2,
   Play,
   Fingerprint,
-  Star
+  Star,
+  Heart,
+  MessageCircle,
+  Plus,
+  Trash2,
+  History
 } from 'lucide-react';
-import { geminiService } from './services/geminiService';
+import { geminiService, FileData } from './services/geminiService';
 import { auth, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { db } from './firebase';
-import { doc, getDoc, setDoc, updateDoc, onSnapshot, serverTimestamp, collection, addDoc, query, orderBy, limit } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, onSnapshot, serverTimestamp, collection, addDoc, query, orderBy, limit, deleteDoc } from 'firebase/firestore';
 
 enum OperationType {
   CREATE = 'create',
@@ -85,14 +100,160 @@ interface GroundingChunk {
   };
 }
 
+interface UserPreferences {
+  aiTone?: 'professional' | 'creative' | 'concise';
+  defaultMode?: 'standard' | 'bespoke' | 'image';
+}
+
+interface UserProfile {
+  uid: string;
+  email: string;
+  displayName?: string;
+  photoURL?: string;
+  createdAt?: any;
+  preferences?: UserPreferences;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
   groundingMetadata?: GroundingChunk[];
-  image?: { data: string; mimeType: string };
+  files?: FileData[];
+  generatedImage?: string;
 }
+
+interface Conversation {
+  id: string;
+  title: string;
+  lastMessage?: string;
+  timestamp: Date;
+}
+
+function TiltCard({ children, className }: { children: React.ReactNode; className?: string }) {
+  const x = useMotionValue(0);
+  const y = useMotionValue(0);
+
+  const mouseXSpring = useSpring(x);
+  const mouseYSpring = useSpring(y);
+
+  const rotateX = useTransform(mouseYSpring, [-0.5, 0.5], ["15deg", "-15deg"]);
+  const rotateY = useTransform(mouseXSpring, [-0.5, 0.5], ["-15deg", "15deg"]);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const xPct = mouseX / width - 0.5;
+    const yPct = mouseY / height - 0.5;
+    x.set(xPct);
+    y.set(yPct);
+  };
+
+  const handleMouseLeave = () => {
+    x.set(0);
+    y.set(0);
+  };
+
+  return (
+    <motion.div
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      style={{
+        rotateY,
+        rotateX,
+        transformStyle: "preserve-3d",
+      }}
+      className={className}
+    >
+      <div 
+        className="w-full h-full"
+        style={{ transform: "translateZ(50px)", transformStyle: "preserve-3d" }}
+      >
+        {children}
+      </div>
+    </motion.div>
+  );
+}
+
+const compressImage = async (dataUrl: string, maxWidth = 1024, maxHeight = 1024, quality = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > maxWidth) {
+          height *= maxWidth / width;
+          width = maxWidth;
+        }
+      } else {
+        if (height > maxHeight) {
+          width *= maxHeight / height;
+          height = maxHeight;
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Could not get canvas context'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+};
+
+const pcmToWav = (pcmBase64: string, sampleRate = 24000) => {
+  const byteCharacters = atob(pcmBase64);
+  const pcmData = new Uint8Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    pcmData[i] = byteCharacters.charCodeAt(i);
+  }
+  
+  const wavHeader = new ArrayBuffer(44);
+  const view = new DataView(wavHeader);
+
+  // RIFF identifier
+  view.setUint32(0, 0x52494646, false); // "RIFF"
+  // file length
+  view.setUint32(4, 36 + pcmData.length, true);
+  // RIFF type
+  view.setUint32(8, 0x57415645, false); // "WAVE"
+  // format chunk identifier
+  view.setUint32(12, 0x666d7420, false); // "fmt "
+  // format chunk length
+  view.setUint32(16, 16, true);
+  // sample format (raw)
+  view.setUint16(20, 1, true);
+  // channel count
+  view.setUint16(22, 1, true);
+  // sample rate
+  view.setUint32(24, sampleRate, true);
+  // byte rate (sample rate * block align)
+  view.setUint32(28, sampleRate * 2, true);
+  // block align (channel count * bytes per sample)
+  view.setUint16(32, 2, true);
+  // bits per sample
+  view.setUint16(34, 16, true);
+  // data chunk identifier
+  view.setUint32(36, 0x64617461, false); // "data"
+  // data chunk length
+  view.setUint32(40, pcmData.length, true);
+
+  const blob = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
+};
 
 export default function App() {
   const [screen, setScreen] = useState<'landing' | 'chat'>('landing');
@@ -100,17 +261,21 @@ export default function App() {
   const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
-  const [profileData, setProfileData] = useState<any>(null);
+  const [profileData, setProfileData] = useState<UserProfile | null>(null);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [editName, setEditName] = useState('');
   const [nameError, setNameError] = useState('');
-  const [selectedImage, setSelectedImage] = useState<{ data: string; mimeType: string } | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<FileData[]>([]);
   const [isThinkingMode, setIsThinkingMode] = useState(false);
+  const [isImageGenerationMode, setIsImageGenerationMode] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [showDemoModal, setShowDemoModal] = useState(false);
   const [storyStep, setStoryStep] = useState(0);
@@ -163,6 +328,7 @@ export default function App() {
 
   useEffect(() => {
     let unsubscribeProfile: (() => void) | undefined;
+    let unsubscribeConversations: (() => void) | undefined;
     let unsubscribeMessages: (() => void) | undefined;
 
     const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
@@ -180,18 +346,21 @@ export default function App() {
           handleFirestoreError(error, OperationType.GET, `users/${currentUser.uid}`);
         });
 
-        // Listen to chat messages
-        const messagesRef = collection(db, 'users', currentUser.uid, 'messages');
-        const q = query(messagesRef, orderBy('timestamp', 'asc'));
-        unsubscribeMessages = onSnapshot(q, (snapshot) => {
-          const loadedMessages = snapshot.docs.map(doc => ({
+        // Listen to conversations
+        const convsRef = collection(db, 'users', currentUser.uid, 'conversations');
+        const qConvs = query(convsRef, orderBy('timestamp', 'desc'));
+        unsubscribeConversations = onSnapshot(qConvs, (snapshot) => {
+          const loadedConvs = snapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data(),
             timestamp: doc.data().timestamp?.toDate() || new Date()
-          })) as Message[];
-          setMessages(loadedMessages);
-        }, (error) => {
-          handleFirestoreError(error, OperationType.LIST, `users/${currentUser.uid}/messages`);
+          })) as Conversation[];
+          setConversations(loadedConvs);
+          
+          // Auto-select first conversation if none active
+          if (loadedConvs.length > 0 && !activeSessionId) {
+            setActiveSessionId(loadedConvs[0].id);
+          }
         });
 
         // Check if user document exists, if not create it
@@ -212,7 +381,10 @@ export default function App() {
       } else {
         setProfileData(null);
         setMessages([]);
+        setConversations([]);
+        setActiveSessionId(null);
         if (unsubscribeProfile) unsubscribeProfile();
+        if (unsubscribeConversations) unsubscribeConversations();
         if (unsubscribeMessages) unsubscribeMessages();
       }
     });
@@ -220,9 +392,33 @@ export default function App() {
     return () => {
       unsubscribeAuth();
       if (unsubscribeProfile) unsubscribeProfile();
+      if (unsubscribeConversations) unsubscribeConversations();
       if (unsubscribeMessages) unsubscribeMessages();
     };
   }, []);
+
+  // Separate effect for messages to handle activeSessionId changes
+  useEffect(() => {
+    if (!user || !activeSessionId) {
+      setMessages([]);
+      return;
+    }
+
+    const messagesRef = collection(db, 'users', user.uid, 'conversations', activeSessionId, 'messages');
+    const q = query(messagesRef, orderBy('timestamp', 'asc'));
+    const unsubscribeMessages = onSnapshot(q, (snapshot) => {
+      const loadedMessages = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp?.toDate() || new Date()
+      })) as Message[];
+      setMessages(loadedMessages);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/conversations/${activeSessionId}/messages`);
+    });
+
+    return () => unsubscribeMessages();
+  }, [user, activeSessionId]);
 
   useEffect(() => {
     if (showProfile && profileData) {
@@ -230,6 +426,21 @@ export default function App() {
       setNameError('');
     }
   }, [showProfile, profileData]);
+
+  useEffect(() => {
+    if (profileData?.preferences?.defaultMode) {
+      if (profileData.preferences.defaultMode === 'bespoke') {
+        setIsThinkingMode(true);
+        setIsImageGenerationMode(false);
+      } else if (profileData.preferences.defaultMode === 'image') {
+        setIsImageGenerationMode(true);
+        setIsThinkingMode(false);
+      } else {
+        setIsThinkingMode(false);
+        setIsImageGenerationMode(false);
+      }
+    }
+  }, [profileData?.preferences?.defaultMode]);
 
   const handleUpdateDisplayName = async (newName: string) => {
     if (!user) return;
@@ -259,21 +470,63 @@ export default function App() {
     }
   };
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleUpdatePreference = async (key: string, value: any) => {
+    if (!user) return;
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      await updateDoc(userDocRef, {
+        [`preferences.${key}`]: value
+      });
+      setNotification({ message: "Preference updated!", type: 'info' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+    }
+  };
 
-    if (!file.type.startsWith('image/')) {
-      setNotification({ message: "Please select an image file.", type: 'error' });
-      return;
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const newFiles: FileData[] = [];
+    
+    for (const fileItem of files) {
+      const file = fileItem as File;
+      const reader = new FileReader();
+      const filePromise = new Promise<FileData>((resolve, reject) => {
+        reader.onloadend = async () => {
+          const dataUrl = reader.result as string;
+          let data = dataUrl.split(',')[1];
+          let mimeType = file.type;
+
+          if (file.type.startsWith('image/')) {
+            try {
+              const compressedDataUrl = await compressImage(dataUrl);
+              data = compressedDataUrl.split(',')[1];
+              mimeType = 'image/jpeg';
+            } catch (error) {
+              console.error("Image compression error:", error);
+            }
+          }
+
+          resolve({
+            data,
+            mimeType,
+            name: file.name
+          });
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      try {
+        const fileData = await filePromise;
+        newFiles.push(fileData);
+      } catch (error) {
+        console.error("Error reading file:", error);
+      }
     }
 
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      setSelectedImage({ data: base64, mimeType: file.type });
-    };
-    reader.readAsDataURL(file);
+    setSelectedFiles(prev => [...prev, ...newFiles]);
   };
 
   const handleTranscription = async () => {
@@ -320,8 +573,7 @@ export default function App() {
     try {
       const base64Audio = await geminiService.generateSpeech(text);
       if (base64Audio) {
-        const audioBlob = await (await fetch(`data:audio/wav;base64,${base64Audio}`)).blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
+        const audioUrl = pcmToWav(base64Audio);
         const audio = new Audio(audioUrl);
         audio.play();
       }
@@ -408,15 +660,42 @@ export default function App() {
     }
   };
 
+  const createNewSession = async () => {
+    if (!user) return;
+    setActiveSessionId(null);
+    setMessages([]);
+    setIsSidebarOpen(false);
+  };
+
+  const deleteSession = async (sessionId: string) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'conversations', sessionId));
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error("Error deleting session:", error);
+    }
+  };
+
   const handleLogout = async () => {
     try {
       await signOut(auth);
       setScreen('landing');
       setMessages([]);
+      setConversations([]);
+      setActiveSessionId(null);
       setNotification({ message: "Logged out successfully.", type: 'info' });
     } catch (error: any) {
       console.error("Logout error:", error);
     }
+  };
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setNotification({ message: "Message copied to clipboard!", type: 'info' });
   };
 
   useEffect(() => {
@@ -491,30 +770,90 @@ export default function App() {
   }, [allMessages, isTyping]);
 
   const handleSend = async () => {
-    if ((!input.trim() && !selectedImage) || !user) return;
+    if ((!input.trim() && selectedFiles.length === 0) || !user) return;
 
-    const userMessage = {
+    let currentSessionId = activeSessionId;
+
+    // Create new session if none exists
+    if (!currentSessionId) {
+      try {
+        const convsRef = collection(db, 'users', user.uid, 'conversations');
+        const newConv = await addDoc(convsRef, {
+          title: input.slice(0, 40) + (input.length > 40 ? '...' : ''),
+          timestamp: serverTimestamp(),
+        });
+        currentSessionId = newConv.id;
+        setActiveSessionId(currentSessionId);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/conversations`);
+        return;
+      }
+    }
+
+    const userMessage: any = {
       role: 'user' as const,
       content: input,
       timestamp: serverTimestamp(),
-      image: selectedImage ? { ...selectedImage } : undefined
     };
 
-    const messagesRef = collection(db, 'users', user.uid, 'messages');
+    if (selectedFiles.length > 0) {
+      userMessage.files = [...selectedFiles];
+    }
+
+    const messagesRef = collection(db, 'users', user.uid, 'conversations', currentSessionId, 'messages');
+    const convDocRef = doc(db, 'users', user.uid, 'conversations', currentSessionId);
     
     try {
       await addDoc(messagesRef, userMessage);
+      await updateDoc(convDocRef, { 
+        lastMessage: input,
+        timestamp: serverTimestamp() 
+      });
+      
       const currentInput = input;
-      const currentImage = selectedImage;
+      const currentFiles = [...selectedFiles];
       
       setInput('');
-      setSelectedImage(null);
+      setSelectedFiles([]);
       setIsTyping(true);
+
+      if (isImageGenerationMode) {
+        try {
+          const imageUrl = await geminiService.generateImage(currentInput);
+          setIsTyping(false);
+          
+          if (imageUrl) {
+            const compressedImageUrl = await compressImage(imageUrl);
+            await addDoc(messagesRef, {
+              role: 'assistant',
+              content: `I've generated this image based on your prompt: "${currentInput}"`,
+              generatedImage: compressedImageUrl,
+              timestamp: serverTimestamp(),
+            });
+          } else {
+            await addDoc(messagesRef, {
+              role: 'assistant',
+              content: "I'm sorry, I couldn't generate an image for that prompt. Please try something else.",
+              timestamp: serverTimestamp(),
+            });
+          }
+        } catch (error: any) {
+          console.error("Image generation error:", error);
+          setIsTyping(false);
+          await addDoc(messagesRef, {
+            role: 'assistant',
+            content: "An error occurred during image generation. Please check your configuration.",
+            timestamp: serverTimestamp(),
+          });
+        }
+        return;
+      }
 
       const stream = await geminiService.generateResponseStream(currentInput, {
         location: location || undefined,
-        image: currentImage || undefined,
-        thinking: isThinkingMode
+        files: currentFiles,
+        thinking: isThinkingMode,
+        tone: profileData?.preferences?.aiTone
       });
       
       setIsTyping(false);
@@ -548,11 +887,20 @@ export default function App() {
         }
 
         // Save assistant message to Firestore
-        await addDoc(messagesRef, {
+        const assistantMessage: any = {
           role: 'assistant',
           content: fullContent,
           timestamp: serverTimestamp(),
-          groundingMetadata: groundingMetadata.length > 0 ? groundingMetadata : undefined
+        };
+
+        if (groundingMetadata.length > 0) {
+          assistantMessage.groundingMetadata = groundingMetadata;
+        }
+
+        await addDoc(messagesRef, assistantMessage);
+        await updateDoc(convDocRef, { 
+          lastMessage: fullContent.slice(0, 100),
+          timestamp: serverTimestamp() 
         });
       } catch (streamError: any) {
         console.error("Streaming error:", streamError);
@@ -577,22 +925,9 @@ export default function App() {
       
       setStreamingMessage(null);
     } catch (error: any) {
-      console.error("Error generating response:", error);
+      handleFirestoreError(error, OperationType.WRITE, messagesRef.path);
       setIsTyping(false);
       setStreamingMessage(null);
-      
-      let errorMessage = "An error occurred while communicating with the AI.";
-      if (error.message?.includes("API_KEY_INVALID") || error.message?.includes("API_KEY")) {
-        errorMessage = "Invalid Gemini API key. Please check your configuration.";
-      } else if (error.message?.includes("QUOTA_EXCEEDED")) {
-        errorMessage = "AI quota exceeded. Please try again later.";
-      }
-      
-      await addDoc(messagesRef, {
-        role: 'assistant',
-        content: errorMessage,
-        timestamp: serverTimestamp(),
-      });
     }
   };
 
@@ -648,6 +983,38 @@ export default function App() {
               <div className="absolute top-[10%] left-[50%] -translate-x-1/2 w-[80%] h-[80%] bg-[var(--accent)]/10 blur-[180px] rounded-full animate-pulse" />
               <div className="absolute -bottom-[20%] -left-[10%] w-[60%] h-[60%] bg-blue-500/10 blur-[180px] rounded-full" />
               <div className="absolute -top-[20%] -right-[10%] w-[60%] h-[60%] bg-purple-500/10 blur-[180px] rounded-full" />
+              
+              {/* Floating 3D Elements */}
+              <motion.div 
+                animate={{ 
+                  y: [0, -20, 0],
+                  rotate: [0, 10, 0]
+                }}
+                transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
+                className="absolute top-[20%] left-[15%] text-[var(--accent)]/20"
+              >
+                <Heart size={120} strokeWidth={0.5} fill="currentColor" />
+              </motion.div>
+              <motion.div 
+                animate={{ 
+                  y: [0, 20, 0],
+                  rotate: [0, -15, 0]
+                }}
+                transition={{ duration: 7, repeat: Infinity, ease: "easeInOut" }}
+                className="absolute top-[40%] right-[10%] text-blue-500/20"
+              >
+                <MessageCircle size={100} strokeWidth={0.5} fill="currentColor" />
+              </motion.div>
+              <motion.div 
+                animate={{ 
+                  scale: [1, 1.1, 1],
+                  rotate: [0, 45, 0]
+                }}
+                transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+                className="absolute bottom-[20%] left-[20%] text-purple-500/20"
+              >
+                <Star size={80} strokeWidth={0.5} fill="currentColor" />
+              </motion.div>
             </div>
 
             {/* Navigation */}
@@ -657,13 +1024,18 @@ export default function App() {
                   <div className="w-10 h-10 rounded-full border border-[var(--accent)]/30 flex items-center justify-center transition-all group-hover:border-[var(--accent)] group-hover:shadow-[0_0_15px_rgba(212,175,55,0.2)]">
                     <Bot size={20} className="text-[var(--accent)]" />
                   </div>
-                  <span className="text-xl font-medium tracking-[0.2em] uppercase text-[var(--fg)]">EXplore AI</span>
+                  <span className="text-xl font-medium tracking-[0.2em] uppercase text-[var(--fg)] drop-shadow-[0_2px_5px_rgba(212,175,55,0.2)]">EXplore AI</span>
                 </div>
                 <div className="hidden lg:flex items-center gap-10 text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--muted)]">
+                  <button 
+                    onClick={() => setScreen('chat')}
+                    className="hover:text-[var(--accent)] transition-colors"
+                  >
+                    Atelier
+                  </button>
                   <a href="#" className="hover:text-[var(--accent)] transition-colors">Collection</a>
                   <a href="#" className="hover:text-[var(--accent)] transition-colors">Bespoke</a>
                   <a href="#" className="hover:text-[var(--accent)] transition-colors">Heritage</a>
-                  <a href="#" className="hover:text-[var(--accent)] transition-colors">Concierge</a>
                 </div>
               </div>
               
@@ -675,18 +1047,29 @@ export default function App() {
                   </a>
                 </div>
                 <div className="flex items-center gap-6">
-                  <button 
-                    onClick={() => setShowDemoModal(true)}
-                    className="hidden sm:block text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
-                  >
-                    Private View
-                  </button>
-                  <button 
-                    onClick={handleLogin}
-                    className="px-8 py-3 text-[10px] font-bold uppercase tracking-[0.2em] bg-transparent border border-[var(--accent)] text-[var(--accent)] rounded-sm hover:bg-[var(--accent)] hover:text-black transition-all active:scale-95"
-                  >
-                    Inquire
-                  </button>
+                  {user ? (
+                    <button 
+                      onClick={() => setScreen('chat')}
+                      className="px-8 py-3 text-[10px] font-bold uppercase tracking-[0.2em] bg-[var(--accent)] text-black rounded-sm hover:bg-[var(--fg)] transition-all active:scale-95"
+                    >
+                      Go to Atelier
+                    </button>
+                  ) : (
+                    <>
+                      <button 
+                        onClick={() => setShowDemoModal(true)}
+                        className="hidden sm:block text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
+                      >
+                        Private View
+                      </button>
+                      <button 
+                        onClick={handleLogin}
+                        className="px-8 py-3 text-[10px] font-bold uppercase tracking-[0.2em] bg-transparent border border-[var(--accent)] text-[var(--accent)] rounded-sm hover:bg-[var(--accent)] hover:text-black transition-all active:scale-95"
+                      >
+                        Inquire
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </nav>
@@ -698,12 +1081,12 @@ export default function App() {
                   initial={{ opacity: 0, y: 30 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
-                  className="mb-16"
+                  className="mb-16 relative"
                 >
-                  <h1 className="font-serif italic text-4xl md:text-6xl text-[var(--accent)] mb-8 font-light tracking-wide">
+                  <h1 className="font-serif italic text-4xl md:text-6xl text-[var(--accent)] mb-8 font-light tracking-wide drop-shadow-[0_5px_15px_rgba(212,175,55,0.3)]">
                     The Art of Intelligence
                   </h1>
-                  <h2 className="text-7xl md:text-[140px] font-light tracking-[-0.04em] leading-[0.8] mb-12 text-[var(--fg)]">
+                  <h2 className="text-7xl md:text-[140px] font-light tracking-[-0.04em] leading-[0.8] mb-12 text-[var(--fg)] drop-shadow-[0_20px_50px_rgba(0,0,0,0.5)]">
                     Redefining <br />
                     <span className="font-serif italic font-normal">the Possible.</span>
                   </h2>
@@ -748,7 +1131,7 @@ export default function App() {
                     onClick={() => setScreen('chat')}
                     className="px-16 py-5 text-[12px] font-bold uppercase tracking-[0.4em] border border-[var(--accent)]/30 text-[var(--fg)] hover:border-[var(--accent)] transition-all active:scale-95"
                   >
-                    Enter the Atelier
+                    {user ? "Go to Atelier" : "Enter the Atelier"}
                   </button>
                 </motion.div>
 
@@ -786,9 +1169,10 @@ export default function App() {
                           initial={{ opacity: 0, y: 20 }}
                           whileInView={{ opacity: 1, y: 0 }}
                           transition={{ delay: i * 0.2 }}
+                          whileHover={{ x: 10, scale: 1.02 }}
                           className={`group transition-all cursor-pointer border-l-2 pl-10 py-4 ${
                             storyStep === i 
-                              ? 'border-[var(--accent)]' 
+                              ? 'border-[var(--accent)] bg-white/5' 
                               : 'border-white/5 opacity-30 hover:opacity-100'
                           }`}
                           onClick={() => setStoryStep(i)}
@@ -804,37 +1188,68 @@ export default function App() {
                     </div>
                   </div>
                   
-                  <div className="relative aspect-[4/5] rounded-sm overflow-hidden border border-[var(--accent)]/10 bg-zinc-900 shadow-[0_40px_100px_rgba(0,0,0,0.5)]">
+                  <TiltCard className="relative aspect-[4/5] rounded-sm overflow-hidden border border-[var(--accent)]/10 bg-zinc-900 shadow-[0_40px_100px_rgba(0,0,0,0.5)] perspective-[1000px] group/card">
                     <AnimatePresence mode="wait">
                       <motion.div
                         key={storyStep}
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 1.2 }}
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -20 }}
+                        transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
                         className="absolute inset-0"
                       >
                         <img 
-                          src={`https://picsum.photos/seed/luxury${storyStep}/1200/1500`} 
+                          src={`https://picsum.photos/seed/luxury_abstract_${storyStep}/1200/1500`} 
                           alt="Story Visual" 
-                          className="w-full h-full object-cover opacity-40 sepia-[0.3] brightness-[0.7]"
+                          className="w-full h-full object-cover opacity-60 group-hover/card:scale-110 transition-transform duration-[3000ms]"
                           referrerPolicy="no-referrer"
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-[#050505] via-transparent to-transparent" />
-                        <div className="absolute bottom-16 left-16 right-16">
+                        
+                        {/* Chapter Navigation Overlay */}
+                        <div className="absolute inset-0 flex items-center justify-between px-6 opacity-0 group-hover/card:opacity-100 transition-opacity duration-500">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setStoryStep((prev) => (prev - 1 + stories.length) % stories.length);
+                            }}
+                            className="w-12 h-12 rounded-full border border-white/10 bg-black/20 backdrop-blur-md flex items-center justify-center text-white hover:bg-[var(--accent)] hover:text-black transition-all"
+                          >
+                            <ChevronRight className="rotate-180" size={20} />
+                          </button>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setStoryStep((prev) => (prev + 1) % stories.length);
+                            }}
+                            className="w-12 h-12 rounded-full border border-white/10 bg-black/20 backdrop-blur-md flex items-center justify-center text-white hover:bg-[var(--accent)] hover:text-black transition-all"
+                          >
+                            <ChevronRight size={20} />
+                          </button>
+                        </div>
+
+                        <div className="absolute bottom-16 left-16 right-16" style={{ transform: "translateZ(30px)" }}>
                           <div className="flex items-center justify-between mb-8">
-                            <span className="text-[10px] font-bold uppercase tracking-[0.4em] text-[var(--accent)]">Volume 0{storyStep + 1}</span>
+                            <span className="text-[10px] font-bold uppercase tracking-[0.4em] text-[var(--accent)]">Chapter 0{storyStep + 1}</span>
                             <div className="flex gap-4">
                               {stories.map((_, i) => (
-                                <div key={i} className={`w-1 h-1 rounded-full transition-all ${storyStep === i ? 'bg-[var(--accent)] scale-150' : 'bg-white/10'}`} />
+                                <button 
+                                  key={i} 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setStoryStep(i);
+                                  }}
+                                  className={`w-1 h-1 rounded-full transition-all ${storyStep === i ? 'bg-[var(--accent)] scale-150' : 'bg-white/10 hover:bg-white/30'}`} 
+                                />
                               ))}
                             </div>
                           </div>
                           <div className="h-[1px] w-full bg-white/5 relative overflow-hidden">
                             <motion.div 
+                              key={storyStep}
                               initial={{ x: '-100%' }}
                               animate={{ x: '0%' }}
-                              transition={{ duration: 6, ease: "linear" }}
+                              transition={{ duration: 8, ease: "linear" }}
                               onAnimationComplete={() => setStoryStep((storyStep + 1) % stories.length)}
                               className="absolute inset-0 bg-[var(--accent)]/40"
                             />
@@ -842,8 +1257,44 @@ export default function App() {
                         </div>
                       </motion.div>
                     </AnimatePresence>
-                  </div>
+                  </TiltCard>
                 </div>
+
+                {/* Chapter Carousel View */}
+                <motion.div 
+                  initial={{ opacity: 0, y: 30 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.5 }}
+                  className="mt-32 flex justify-center gap-8 overflow-x-auto pb-8 no-scrollbar"
+                >
+                  {stories.map((story, i) => (
+                    <motion.button
+                      key={i}
+                      onClick={() => setStoryStep(i)}
+                      whileHover={{ y: -10 }}
+                      className={`relative flex-shrink-0 w-48 group transition-all ${storyStep === i ? 'opacity-100' : 'opacity-40 hover:opacity-100'}`}
+                    >
+                      <div className={`aspect-video rounded-sm overflow-hidden border ${storyStep === i ? 'border-[var(--accent)]' : 'border-white/10'} mb-4`}>
+                        <img 
+                          src={`https://picsum.photos/seed/luxury_abstract_${i}/400/225?grayscale`} 
+                          alt={story.title}
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                      </div>
+                      <div className="text-left">
+                        <span className="text-[8px] font-bold uppercase tracking-[0.3em] text-[var(--accent)] mb-1 block">Chapter 0{i + 1}</span>
+                        <h4 className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--fg)] truncate">{story.title}</h4>
+                      </div>
+                      {storyStep === i && (
+                        <motion.div 
+                          layoutId="chapter-active"
+                          className="absolute -bottom-2 left-0 right-0 h-[1px] bg-[var(--accent)]"
+                        />
+                      )}
+                    </motion.button>
+                  ))}
+                </motion.div>
               </div>
 
               <motion.div
@@ -860,7 +1311,7 @@ export default function App() {
                   onClick={() => setScreen('chat')}
                   className="px-20 py-6 text-[12px] font-bold uppercase tracking-[0.6em] bg-[var(--accent)] text-black hover:bg-[var(--fg)] transition-all active:scale-95"
                 >
-                  Inquire Now
+                  {user ? "Go to Atelier" : "Inquire Now"}
                 </button>
               </motion.div>
             </main>
@@ -945,32 +1396,129 @@ export default function App() {
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
-            className="flex flex-col h-screen max-w-5xl mx-auto border-x border-[var(--border)] bg-[var(--bg)]"
+            className="flex h-screen bg-[var(--bg)] overflow-hidden"
           >
-            {/* Chat Header */}
-            <header className="flex items-center justify-between px-8 py-6 border-b border-[var(--accent)]/10 bg-[#050505]/80 backdrop-blur-xl sticky top-0 z-20">
-              <div className="flex items-center gap-4">
-                <button 
-                  onClick={() => setScreen('landing')}
-                  className="p-2 hover:bg-white/5 rounded-full transition-colors text-[var(--accent)]"
+            {/* Sidebar */}
+            <AnimatePresence>
+              {isSidebarOpen && (
+                <motion.aside
+                  initial={{ x: -300, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: -300, opacity: 0 }}
+                  className="fixed inset-y-0 left-0 z-40 w-80 bg-[#0A0A0A] border-r border-[var(--border)] flex flex-col"
                 >
-                  <ChevronRight size={20} className="rotate-180" />
-                </button>
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-full border border-[var(--accent)]/30 flex items-center justify-center">
-                    <Bot size={20} className="text-[var(--accent)]" />
+                  <div className="p-6 border-b border-[var(--border)] flex items-center justify-between">
+                    <h2 className="text-xs font-bold uppercase tracking-[0.3em] text-[var(--muted)]">History</h2>
+                    <button 
+                      onClick={() => setIsSidebarOpen(false)}
+                      className="p-2 hover:bg-white/5 rounded-sm text-[var(--muted)]"
+                    >
+                      <X size={16} />
+                    </button>
                   </div>
-                  <div>
-                    <h2 className="font-serif italic text-xl text-[var(--fg)] leading-none mb-1">EXplore AI</h2>
-                    <div className="flex items-center gap-2">
-                      <div className="w-1 h-1 rounded-full bg-[var(--accent)] animate-pulse" />
-                      <span className="text-[8px] text-[var(--muted)] uppercase font-bold tracking-[0.2em]">
-                        {isThinkingMode ? 'Bespoke Reasoning Active' : 'Atelier Online'}
-                      </span>
+
+                  <div className="p-4">
+                    <button 
+                      onClick={createNewSession}
+                      className="w-full py-4 flex items-center justify-center gap-3 bg-white/5 border border-dashed border-white/20 rounded-sm text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--fg)] hover:border-[var(--accent)]/50 hover:bg-white/10 transition-all"
+                    >
+                      <Plus size={14} />
+                      New Inquire
+                    </button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar">
+                    {conversations.map((conv) => (
+                      <div 
+                        key={conv.id}
+                        className={`group relative flex items-center gap-3 p-4 rounded-sm transition-all cursor-pointer ${
+                          activeSessionId === conv.id 
+                            ? 'bg-[var(--accent)]/10 border border-[var(--accent)]/30' 
+                            : 'hover:bg-white/5 border border-transparent'
+                        }`}
+                        onClick={() => {
+                          setActiveSessionId(conv.id);
+                          setIsSidebarOpen(false);
+                        }}
+                      >
+                        <MessageSquare size={16} className={activeSessionId === conv.id ? 'text-[var(--accent)]' : 'text-[var(--muted)]'} />
+                        <div className="flex-1 min-w-0">
+                          <h4 className={`text-[11px] font-medium truncate ${activeSessionId === conv.id ? 'text-[var(--fg)]' : 'text-[var(--muted)]'}`}>
+                            {conv.title || 'Untitled Session'}
+                          </h4>
+                          <p className="text-[9px] text-zinc-600 truncate mt-0.5">
+                            {conv.timestamp.toLocaleDateString()}
+                          </p>
+                        </div>
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteSession(conv.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-2 hover:text-red-400 transition-all"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="p-6 border-t border-[var(--border)]">
+                    {user && (
+                      <div className="flex items-center gap-4">
+                        <div className="w-8 h-8 rounded-full border border-[var(--border)] overflow-hidden">
+                          {profileData?.photoURL ? (
+                            <img src={profileData.photoURL} alt="User" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full bg-blue-600 flex items-center justify-center text-[10px] text-white">
+                              {user.email?.[0].toUpperCase()}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[10px] font-bold text-[var(--fg)] truncate">{profileData?.displayName || 'Anonymous'}</p>
+                          <p className="text-[8px] text-[var(--muted)] truncate">{user.email}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </motion.aside>
+              )}
+            </AnimatePresence>
+
+            {/* Main Chat Container */}
+            <div className="flex-1 flex flex-col max-w-5xl mx-auto border-x border-[var(--border)] relative">
+              {/* Chat Header */}
+              <header className="flex items-center justify-between px-8 py-6 border-b border-[var(--accent)]/10 bg-[#050505]/80 backdrop-blur-xl sticky top-0 z-20">
+                <div className="flex items-center gap-4">
+                  <button 
+                    onClick={() => setIsSidebarOpen(true)}
+                    className="p-2 hover:bg-white/5 rounded-sm text-[var(--accent)]"
+                    title="History"
+                  >
+                    <History size={20} />
+                  </button>
+                  <button 
+                    onClick={() => setScreen('landing')}
+                    className="p-2 hover:bg-white/5 rounded-full transition-colors text-[var(--accent)]"
+                  >
+                    <ChevronRight size={20} className="rotate-180" />
+                  </button>
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 rounded-full border border-[var(--accent)]/30 flex items-center justify-center">
+                      <Bot size={20} className="text-[var(--accent)]" />
+                    </div>
+                    <div>
+                      <h2 className="font-serif italic text-xl text-[var(--fg)] leading-none mb-1">EXplore AI</h2>
+                      <div className="flex items-center gap-2">
+                        <div className="w-1 h-1 rounded-full bg-[var(--accent)] animate-pulse" />
+                        <span className="text-[8px] text-[var(--muted)] uppercase font-bold tracking-[0.2em]">
+                          {activeSessionId ? conversations.find(c => c.id === activeSessionId)?.title || 'Atelier Online' : 'New Inquire'}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => setIsThinkingMode(!isThinkingMode)}
@@ -1023,6 +1571,13 @@ export default function App() {
                 )}
                 <button className="p-2 hover:bg-[var(--card-bg)] rounded-lg transition-colors">
                   <Menu size={20} />
+                </button>
+                <button 
+                  onClick={handleLogout}
+                  className="p-2 bg-white/5 border border-white/10 text-[var(--muted)] hover:text-red-400 hover:border-red-400/30 rounded-sm transition-all"
+                  title="Logout"
+                >
+                  <LogOut size={14} />
                 </button>
               </div>
             </header>
@@ -1119,6 +1674,50 @@ export default function App() {
                         </div>
                       </div>
 
+                      <div className="pt-6 border-t border-[var(--border)]">
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-4">
+                          AI Preferences
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <span className="text-[10px] text-zinc-400 uppercase tracking-wider">AI Response Tone</span>
+                            <div className="flex gap-2">
+                              {(['professional', 'creative', 'concise'] as const).map((tone) => (
+                                <button
+                                  key={tone}
+                                  onClick={() => handleUpdatePreference('aiTone', tone)}
+                                  className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all border ${
+                                    profileData.preferences?.aiTone === tone
+                                      ? 'bg-[var(--accent)]/10 border-[var(--accent)] text-[var(--accent)]'
+                                      : 'bg-white/5 border-white/10 text-zinc-500 hover:border-white/20'
+                                  }`}
+                                >
+                                  {tone}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Default Mode</span>
+                            <div className="flex gap-2">
+                              {(['standard', 'bespoke', 'image'] as const).map((mode) => (
+                                <button
+                                  key={mode}
+                                  onClick={() => handleUpdatePreference('defaultMode', mode)}
+                                  className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all border ${
+                                    profileData.preferences?.defaultMode === mode
+                                      ? 'bg-[var(--accent)]/10 border-[var(--accent)] text-[var(--accent)]'
+                                      : 'bg-white/5 border-white/10 text-zinc-500 hover:border-white/20'
+                                  }`}
+                                >
+                                  {mode}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
                       <div className="pt-4 border-t border-[var(--border)]">
                         <div className="flex items-center justify-between text-sm">
                           <span className="text-zinc-500">Account Created</span>
@@ -1169,27 +1768,69 @@ export default function App() {
                           ? 'bg-[var(--accent)]/5 border border-[var(--accent)]/20 text-[var(--fg)]' 
                           : 'bg-white/5 border border-white/10 text-[var(--fg)]'
                       }`}>
-                        {msg.image && (
-                          <div className="mb-3 rounded-xl overflow-hidden border border-white/10 max-w-sm">
+                        {msg.files && msg.files.length > 0 && (
+                          <div className="mb-3 flex flex-wrap gap-3">
+                            {msg.files.map((file, idx) => (
+                              <div key={idx} className="rounded-xl overflow-hidden border border-white/10 max-w-[200px] bg-white/5 p-2">
+                                {file.mimeType.startsWith('image/') ? (
+                                  <img 
+                                    src={`data:${file.mimeType};base64,${file.data}`} 
+                                    alt="Uploaded" 
+                                    className="w-full h-auto object-cover rounded-lg"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                ) : (
+                                  <div className="flex items-center gap-2 p-2">
+                                    <FileImage size={16} className="text-[var(--accent)]" />
+                                    <span className="text-[10px] text-zinc-400 truncate">
+                                      {file.name || 'Document'}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {msg.generatedImage && (
+                          <div className="mb-3 relative group/img rounded-xl overflow-hidden border border-[var(--accent)]/30 max-w-sm shadow-[0_0_30px_rgba(212,175,55,0.2)]">
                             <img 
-                              src={`data:${msg.image.mimeType};base64,${msg.image.data}`} 
-                              alt="Uploaded" 
+                              src={msg.generatedImage} 
+                              alt="Generated" 
                               className="w-full h-auto object-cover"
                               referrerPolicy="no-referrer"
                             />
+                            <a 
+                              href={msg.generatedImage}
+                              download={`EXploreAI-Generated-${msg.id}.jpg`}
+                              className="absolute top-4 right-4 p-3 bg-black/60 backdrop-blur-md border border-white/10 rounded-sm text-white opacity-0 group-hover/img:opacity-100 transition-all hover:bg-[var(--accent)] hover:text-black"
+                              title="Download full resolution"
+                            >
+                              <Download size={16} />
+                            </a>
                           </div>
                         )}
                         <div className="whitespace-pre-wrap">{msg.content}</div>
                         
-                        {msg.role === 'assistant' && msg.content && (
+                        <div className={`absolute top-0 flex gap-1 transition-all opacity-0 group-hover:opacity-100 ${
+                          msg.role === 'user' ? '-left-20' : '-right-20'
+                        }`}>
+                          {msg.role === 'assistant' && msg.content && (
+                            <button 
+                              onClick={() => playTTS(msg.content)}
+                              className="p-2 hover:bg-white/5 rounded-xl text-[var(--muted)] hover:text-blue-400 transition-all"
+                              title="Read aloud"
+                            >
+                              <Volume2 size={16} />
+                            </button>
+                          )}
                           <button 
-                            onClick={() => playTTS(msg.content)}
-                            className="absolute -right-10 top-0 p-2 opacity-0 group-hover:opacity-100 hover:bg-white/5 rounded-xl text-[var(--muted)] hover:text-blue-400 transition-all"
-                            title="Read aloud"
+                            onClick={() => handleCopy(msg.content)}
+                            className="p-2 hover:bg-white/5 rounded-xl text-[var(--muted)] hover:text-blue-400 transition-all"
+                            title="Copy message"
                           >
-                            <Volume2 size={16} />
+                            <Copy size={16} />
                           </button>
-                        )}
+                        </div>
                         
                         {msg.groundingMetadata && msg.groundingMetadata.length > 0 && (
                           <div className="mt-4 pt-4 border-t border-[var(--border)]">
@@ -1261,26 +1902,40 @@ export default function App() {
             {/* Input Area */}
             <footer className="p-8 bg-[#050505]/80 backdrop-blur-xl border-t border-[var(--accent)]/10">
               <div className="max-w-4xl mx-auto space-y-6">
-                {selectedImage && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="relative inline-block"
-                  >
-                    <div className="w-24 h-24 rounded-sm overflow-hidden border border-[var(--accent)]/30 shadow-2xl">
-                      <img 
-                        src={`data:${selectedImage.mimeType};base64,${selectedImage.data}`} 
-                        alt="Preview" 
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <button 
-                      onClick={() => setSelectedImage(null)}
-                      className="absolute -top-3 -right-3 p-1.5 bg-black border border-[var(--accent)]/30 text-[var(--accent)] rounded-full shadow-lg hover:bg-[var(--accent)] hover:text-black transition-all"
-                    >
-                      <X size={12} />
-                    </button>
-                  </motion.div>
+                {selectedFiles.length > 0 && (
+                  <div className="flex flex-wrap gap-4">
+                    {selectedFiles.map((file, idx) => (
+                      <motion.div 
+                        key={idx}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="relative group"
+                      >
+                        <div className="w-24 h-24 rounded-sm overflow-hidden border border-[var(--accent)]/30 shadow-2xl bg-white/5 flex flex-col items-center justify-center p-2">
+                          {file.mimeType.startsWith('image/') ? (
+                            <img 
+                              src={`data:${file.mimeType};base64,${file.data}`} 
+                              alt="Preview" 
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <>
+                              <FileImage size={24} className="text-[var(--accent)] mb-2" />
+                              <span className="text-[10px] text-zinc-500 truncate w-full text-center px-1">
+                                {file.name || 'File'}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        <button 
+                          onClick={() => setSelectedFiles(prev => prev.filter((_, i) => i !== idx))}
+                          className="absolute -top-3 -right-3 p-1.5 bg-black border border-[var(--accent)]/30 text-[var(--accent)] rounded-full shadow-lg hover:bg-[var(--accent)] hover:text-black transition-all"
+                        >
+                          <X size={12} />
+                        </button>
+                      </motion.div>
+                    ))}
+                  </div>
                 )}
 
                 <div className="relative flex items-end gap-4">
@@ -1289,10 +1944,11 @@ export default function App() {
                       <input 
                         type="file" 
                         className="hidden" 
-                        accept="image/*"
-                        onChange={handleImageSelect}
+                        multiple
+                        accept="image/*,application/pdf,text/plain"
+                        onChange={handleFileSelect}
                       />
-                      <ImageIcon size={18} />
+                      <Upload size={18} />
                     </label>
                     <textarea
                       ref={textareaRef}
@@ -1305,12 +1961,48 @@ export default function App() {
                           handleSend();
                         }
                       }}
-                      placeholder={isThinkingMode ? "Inquire with bespoke reasoning..." : "Compose your inquiry..."}
+                      placeholder={
+                        isImageGenerationMode 
+                          ? "Describe the image you want to generate..." 
+                          : isThinkingMode 
+                            ? "Inquire with bespoke reasoning..." 
+                            : "Compose your inquiry..."
+                      }
                       className="w-full bg-transparent py-5 pl-2 pr-16 text-sm font-light tracking-wide focus:outline-none resize-none placeholder:text-zinc-700 placeholder:font-serif placeholder:italic min-h-[64px] max-h-[200px] scrollbar-hide"
                     />
+                    <div className="absolute right-16 bottom-3 flex gap-2">
+                      <button
+                        onClick={() => {
+                          setIsImageGenerationMode(!isImageGenerationMode);
+                          if (!isImageGenerationMode) setIsThinkingMode(false);
+                        }}
+                        className={`p-3 rounded-sm transition-all ${
+                          isImageGenerationMode 
+                            ? 'bg-[var(--accent)] text-black' 
+                            : 'bg-white/5 text-[var(--muted)] hover:text-[var(--accent)]'
+                        }`}
+                        title="Toggle image generation"
+                      >
+                        <Sparkles size={16} />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsThinkingMode(!isThinkingMode);
+                          if (!isThinkingMode) setIsImageGenerationMode(false);
+                        }}
+                        className={`p-3 rounded-sm transition-all ${
+                          isThinkingMode 
+                            ? 'bg-[var(--accent)] text-black' 
+                            : 'bg-white/5 text-[var(--muted)] hover:text-[var(--accent)]'
+                        }`}
+                        title="Toggle bespoke reasoning"
+                      >
+                        <Brain size={16} />
+                      </button>
+                    </div>
                     <button
                       onClick={handleSend}
-                      disabled={(!input.trim() && !selectedImage) || isTyping}
+                      disabled={(!input.trim() && selectedFiles.length === 0) || isTyping}
                       className="absolute right-3 bottom-3 p-3 bg-[var(--accent)] hover:bg-[var(--fg)] disabled:opacity-20 disabled:hover:bg-[var(--accent)] rounded-sm transition-all active:scale-95 text-black"
                     >
                       <Send size={16} />
@@ -1333,11 +2025,12 @@ export default function App() {
                 EXplore AI Atelier • Crafted for Excellence
               </p>
             </footer>
-          </motion.div>
+          </div>
+        </motion.div>
+      )}
+    </>
         )}
-      </>
-    )}
-  </AnimatePresence>
-</div>
+      </AnimatePresence>
+    </div>
   );
 }

@@ -9,7 +9,14 @@
         "email": { "type": "string", "format": "email" },
         "displayName": { "type": "string" },
         "photoURL": { "type": "string" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "preferences": {
+          "type": "object",
+          "properties": {
+            "aiTone": { "type": "string", "enum": ["professional", "creative", "concise"] },
+            "defaultMode": { "type": "string", "enum": ["standard", "bespoke", "image"] }
+          }
+        }
       },
       "required": ["uid", "email"]
     },
@@ -22,15 +29,31 @@
         "content": { "type": "string" },
         "timestamp": { "type": "string", "format": "date-time" },
         "groundingMetadata": { "type": "array" },
-        "image": {
-          "type": "object",
-          "properties": {
-            "data": { "type": "string" },
-            "mimeType": { "type": "string" }
+        "generatedImage": { "type": "string" },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "data": { "type": "string" },
+              "mimeType": { "type": "string" },
+              "name": { "type": "string" }
+            }
           }
         }
       },
       "required": ["role", "content", "timestamp"]
+    },
+    "conversations": {
+      "title": "Conversation",
+      "description": "A chat session",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "lastMessage": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "timestamp"]
     }
   },
   "firestore": {
@@ -38,9 +61,13 @@
       "schema": "users",
       "description": "User profile documents"
     },
-    "/users/{userId}/messages/{messageId}": {
+    "/users/{userId}/conversations/{conversationId}": {
+      "schema": "conversations",
+      "description": "Chat sessions for a user"
+    },
+    "/users/{userId}/conversations/{conversationId}/messages/{messageId}": {
       "schema": "messages",
-      "description": "Individual messages in user's chat history"
+      "description": "Messages within a specific conversation"
     }
   }
 }

@@ -8,10 +8,17 @@ if (!apiKey) {
 
 const ai = new GoogleGenAI({ apiKey: apiKey || "" });
 
+export interface FileData {
+  data: string;
+  mimeType: string;
+  name?: string;
+}
+
 export interface GenerateOptions {
   location?: { latitude: number; longitude: number };
-  image?: { data: string; mimeType: string };
+  files?: FileData[];
   thinking?: boolean;
+  tone?: 'professional' | 'creative' | 'concise';
 }
 
 export const geminiService = {
@@ -19,27 +26,43 @@ export const geminiService = {
     if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
     
     const parts: any[] = [{ text: prompt }];
-    if (options.image) {
-      parts.push({
-        inlineData: {
-          data: options.image.data,
-          mimeType: options.image.mimeType
-        }
+    if (options.files && options.files.length > 0) {
+      options.files.forEach(file => {
+        parts.push({
+          inlineData: {
+            data: file.data,
+            mimeType: file.mimeType
+          }
+        });
       });
     }
 
-    const model = options.image || options.thinking ? "gemini-3.1-pro-preview" : "gemini-3-flash-preview";
+    const toneInstructions = {
+      professional: "Maintain a highly professional, formal, and authoritative tone. Use precise language and structured reasoning.",
+      creative: "Be expressive, imaginative, and engaging. Use vivid descriptions and a warm, conversational tone.",
+      concise: "Be extremely brief and to the point. Provide only the essential information without fluff."
+    };
+
+    const systemInstruction = options.tone ? toneInstructions[options.tone] : "You are a helpful and sophisticated AI assistant for the EXplore AI Atelier. Use your research tools to provide accurate, up-to-date information.";
+
+    const hasComplexFiles = options.files?.some(f => f.mimeType.includes('pdf') || f.mimeType.includes('application'));
+    const model = options.thinking || hasComplexFiles ? "gemini-3.1-pro-preview" : "gemini-3-flash-preview";
 
     return ai.models.generateContentStream({
       model: model,
       contents: { parts },
       config: {
-        tools: [{ googleMaps: {} }],
-        toolConfig: options.location ? {
-          retrievalConfig: {
+        systemInstruction,
+        tools: [
+          { googleMaps: {} },
+          { googleSearch: {} }
+        ],
+        toolConfig: {
+          includeServerSideToolInvocations: true,
+          retrievalConfig: options.location ? {
             latLng: options.location
-          }
-        } : undefined,
+          } : undefined
+        },
         thinkingConfig: options.thinking ? {
           thinkingLevel: ThinkingLevel.HIGH
         } : undefined
@@ -91,5 +114,33 @@ export const geminiService = {
     return ai.chats.create({
       model: "gemini-3-flash-preview",
     });
+  },
+
+  async generateImage(prompt: string) {
+    if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          {
+            text: prompt,
+          },
+        ],
+      },
+      config: {
+        imageConfig: {
+          aspectRatio: "1:1",
+        },
+      },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+    
+    return null;
   }
 };
