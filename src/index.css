@@ -1,0 +1,58 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Cormorant Garamond", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --bg: #050505;
+  --fg: #F5F2ED; /* Warm off-white */
+  --muted: #8E8E8E;
+  --accent: #D4AF37; /* Luxury Gold */
+  --border: rgba(212, 175, 55, 0.15);
+  --card-bg: #0A0A0A;
+}
+
+:root {
+  --bg: #050505;
+  --fg: #F5F2ED;
+  --accent: #D4AF37;
+  --card-bg: rgba(255, 255, 255, 0.03);
+  --border: rgba(212, 175, 55, 0.1);
+  --muted: #8E8E8E;
+}
+
+:root.light {
+  --bg: #ffffff;
+  --fg: #050505;
+  --accent: #2563eb;
+  --card-bg: rgba(0, 0, 0, 0.03);
+  --border: rgba(0, 0, 0, 0.1);
+  --muted: #71717a;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Luxury Navigation Styling */
+div#root:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > nav:nth-of-type(1) {
+  background: rgba(5, 5, 5, 0.85);
+  backdrop-filter: blur(30px);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+  padding-left: 3rem;
+  padding-right: 3rem;
+  letter-spacing: 0.1em;
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+}
+
+/* Luxury Icon Styling */
+div#root:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > nav:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > svg:nth-of-type(1) > path:nth-of-type(1) {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 2px rgba(212, 175, 55, 0.3));
+}

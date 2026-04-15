@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "users": {
+      "title": "User",
+      "description": "App user profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "messages": {
+      "title": "Message",
+      "description": "A single chat message",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["user", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "groundingMetadata": { "type": "array" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "data": { "type": "string" },
+            "mimeType": { "type": "string" }
+          }
+        }
+      },
+      "required": ["role", "content", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profile documents"
+    },
+    "/users/{userId}/messages/{messageId}": {
+      "schema": "messages",
+      "description": "Individual messages in user's chat history"
+    }
+  }
+}

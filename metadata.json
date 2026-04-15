@@ -1,0 +1,5 @@
+{
+  "name": "EXplore AI",
+  "description": "A modern, high-performance AI assistant powered by Gemini 3 Flash.",
+  "requestFramePermissions": ["microphone", "geolocation"]
+}
